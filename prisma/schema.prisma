@@ -1,0 +1,74 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("POSTGRES_CONN")
+}
+
+model Business {
+  id    Int     @id @default(autoincrement()) @unique
+  email String  @unique
+  name  String
+  password String
+  uuid String @unique
+  promocodes Promocode[]
+}
+
+model TokenBusiness {
+  id    Int     @id @default(autoincrement()) @unique
+  businessId Int
+  token String
+}
+
+model User {
+  id    Int     @id @default(autoincrement()) @unique
+  email String  @unique
+  name  String
+  password String
+  surname String
+  avatar_url String?
+  other Json
+  comments Comment[]
+  activatedPromocodes String[]
+  likedPromocodes String[]
+}
+
+model TokenUser {
+  id    Int     @id @default(autoincrement()) @unique
+  userId Int
+  token String
+}
+
+model Comment {
+  id    Int     @id @default(autoincrement()) @unique
+  uuid String @unique
+  text String
+  date DateTime @default(now())
+  author User @relation(fields: [authorId], references: [id])
+  authorId Int
+  promocode Promocode @relation(fields: [promocodeId], references: [id])
+  promocodeId Int
+}
+
+
+model Promocode {
+  id    Int     @id @default(autoincrement()) @unique
+  description String
+  active Boolean @default(true)
+  max_count Int
+  active_from String?
+  active_until String?
+  mode String
+  promo_common String?
+  promo_unique String[]
+  target Json
+  author Business @relation(fields: [authorId], references: [id])
+  authorId Int
+  uuid String @unique
+  image_url String?
+  used_count Int @default(0)
+  like_count Int @default(0)
+  comments Comment[]
+}
