@@ -12,7 +12,7 @@ export default z.object({
     active_until: z.string().date().max(10).optional(),
     mode: z.string().refine((val) => val === 'COMMON' || val === 'UNIQUE'),
     promo_common: z.string().min(5).max(30).optional(),
-    promo_unique: z.array(z.string().min(3).max(30)).max(5000).optional(),
+    promo_unique: z.array(z.string().min(3).max(30)).min(1).max(5000).optional(),
     image_url: z.string().max(350).optional(),
     active: z.boolean().optional(),
     used_count: z.number().min(0).optional(),

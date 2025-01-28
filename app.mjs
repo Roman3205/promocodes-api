@@ -1,7 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import businessSchema from './schemas/businessSchema.js'
 import { generateHash } from "./utils/hash.js";
-import { createApp, createRouter, defineEventHandler, eventHandler, useBase, setResponseStatus, readValidatedBody, readBody, createError, useSession, getSession, getRequestURL, getRequestHeader, getRouterParams, setResponseHeader, getQuery, } from "h3";
+import { createApp, createRouter, eventHandler, useBase, readValidatedBody, readBody, createError, getRequestHeader, getRouterParams, setResponseHeader, getQuery, } from "h3";
 import dotenv from 'dotenv'
 import bcrypt from 'bcrypt'
 import dayjs from 'dayjs'
@@ -64,7 +64,7 @@ app.use(eventHandler(async (event) => {
         });
     }
 
-    const business = await prisma.business.findFirst({ where: { id: id.id } })
+    const business = await prisma.business.findFirst({ where: { id: id.id }, omit: { password: false } })
     if (!business) {
         throw createError({
             status: 404,
@@ -101,7 +101,7 @@ app.use(eventHandler(async (event) => {
         });
     }
 
-    const user = await prisma.user.findFirst({ where: { id: id.id } })
+    const user = await prisma.user.findFirst({ where: { id: id.id }, omit: { password: true } })
     if (!user) {
         throw createError({
             status: 404,
@@ -118,6 +118,12 @@ const conn = process.env.POSTGRES_CONN.replace(/"/g, '')
 console.log(conn);
 
 const prisma = new PrismaClient()
+
+await prisma.$connect().catch(async (err) => {
+    await prisma.$disconnect()
+    console.log(err)
+}
+)
 
 const saveUserToken = async (id) => {
     const token = jwt.sign({ id: id, person: 'user' }, process.env.RANDOM_SECRET, {
@@ -145,6 +151,40 @@ const saveBusinessToken = async (id) => {
     return savedToken
 }
 
+const checkPromoActiveViaDate = (from, until) => {
+    let time = dayjs().utc({ keepLocalTime: false })
+    from = dayjs(from).utc({ keepLocalTime: false })
+    until = dayjs(until).utc({ keepLocalTime: false })
+
+
+    if (!until && from) {
+        return time.isSame(from) || time.isAfter(from)
+    }
+
+    if (!from && until) {
+        return time.isSame(until) || time.isBefore(until)
+    }
+
+    if (from && until) {
+        let c1 = time.isSame(from) || time.isAfter(from)
+        let c2 = time.isSame(until) || time.isBefore(until)
+        return c1 && c2
+    }
+
+    return true
+}
+
+const setPromoStatus = async (uuid) => {
+    const promo = await prisma.promocode.findFirst({ where: { uuid: uuid } })
+    let c1 = checkPromoActiveViaDate(promo.active_from, promo.active_until)
+    let c2 = promo.mode == 'UNIQUE' ? promo.promo_unique.length > 0 : true
+    let c3 = promo.mode == 'COMMON' ? promo.max_count > promo.used_count : true
+    if (c1 && c2 && c3) {
+        return true
+    }
+    await prisma.promocode.update({ where: { id: promo.id }, data: { active: false } })
+    return true
+}
 
 api.get('/ping', eventHandler((event) => {
     return {
@@ -231,12 +271,6 @@ api.post('/business/auth/sign-in', eventHandler(async (event) => {
     }
 }))
 
-
-
-
-
-
-
 api.post('/business/promo', eventHandler(async (event) => {
     const { business } = event.context
 
@@ -257,8 +291,18 @@ api.post('/business/promo', eventHandler(async (event) => {
     }
 
     const validatedBody = await readValidatedBody(event, promoSchema.parse)
+
+    if (validatedBody.mode == 'UNIQUE' && validatedBody.max_count > 1) {
+        throw createError({
+            status: 400,
+            data: { message: 'It is unique promo' }
+        });
+    }
+
     const uuid = randomUUID()
-    const promo = await prisma.promocode.create({ data: { ...validatedBody, uuid: uuid, authorId: businessId.id } })
+
+    const promo = await prisma.promocode.create({ data: { ...validatedBody, uuid: uuid, authorId: business.id, active: checkPromoActiveViaDate(validatedBody.active_from, validatedBody.active_until) } })
+
     await prisma.business.update({
         where: { id: business.id }, data: {
             promocodes: {
@@ -274,10 +318,27 @@ api.post('/business/promo', eventHandler(async (event) => {
         id: uuid
     }
 }))
-
+// Если все указанные компанией значения были активированы, промокод принимает значение active = false. Промокоды такого типа могут использоваться, когда компания хочет явно знать, с какой площадки пришел пользователь.
 api.get('/business/promo', eventHandler(async (event) => {
+    const { business } = event.context
+    const { limit, offset, sort_by, country } = getQuery(event)
 
-    return
+    let countries = country?.split(',')[0]
+
+    let promocodes = await prisma.promocode.findMany({
+        where: { authorId: business.id, target: countries?.length > 0 ? { path: ['country'], equals: countries } : {} },
+        skip: offset ? Number(offset) : 0,
+        take: limit ? Number(limit) : 10,
+        orderBy: sort_by == 'from' ? [{
+            active_from: 'desc',
+        }] : sort_by == 'until' ? [{
+            active_until: 'desc',
+        }] : [{ createdAt: 'desc' }]
+    })
+
+    setResponseHeader(event, 'X-Total-Count', promocodes.length)
+
+    return promocodes
 }))
 
 api.get('/business/promo/:id', eventHandler(async (event) => {
@@ -289,6 +350,51 @@ api.get('/business/promo/:id', eventHandler(async (event) => {
         });
     }
     const { business } = event.context
+    const promo = await prisma.promocode.findFirst({ where: { uuid: id }, include: { author: true } })
+    if (!promo) {
+        throw createError({
+            status: 404,
+            data: { message: 'Not found' }
+        });
+    }
+    if (promo.authorId != business.id) {
+        throw createError({
+            status: 403,
+            data: { message: 'It is not your promocode' }
+        });
+    }
+
+    return {
+        promo_id: promo.uuid,
+        company_id: promo.author.uuid,
+        company_name: promo.author.name,
+        active: promo.active,
+        like_count: promo.like_count,
+        used_count: promo.used_count
+    }
+}))
+
+api.patch('/business/promo/:id', eventHandler(async (event) => {
+    const { business } = event.context
+
+    const { id } = getRouterParams(event)
+
+    if (!id) {
+        throw createError({
+            status: 400,
+            data: { message: 'No id passed' }
+        });
+    }
+
+    const body = await readBody(event)
+
+    if (body.mode !== 'COMMON' && body.mode !== 'UNIQUE' || body.mode === 'COMMON' && !body.promo_common || body.mode === 'UNIQUE' && !body.promo_unique || body.mode === 'COMMON' && body.promo_unique || body.mode === 'UNIQUE' && body.promo_common) {
+        throw createError({
+            status: 400,
+            data: { message: 'Incorrect mode' }
+        });
+    }
+
     const promo = await prisma.promocode.findFirst({ where: { uuid: id } })
     if (!promo) {
         throw createError({
@@ -303,74 +409,44 @@ api.get('/business/promo/:id', eventHandler(async (event) => {
         });
     }
 
-    return promo
-}))
-
-api.patch('/business/promo/:id', eventHandler(async (event) => {
-    const { business } = event.context
-
-    const { id } = getRouterParams(event)
-
-    if (!id) {
-        throw createError({
-            status: 400,
-            data: { message: 'No id passed' }
-        });
-    }
-    const body = await readBody(event)
-    const promo = await prisma.promocode.findFirst({ where: { uuid: id } })
-    if (!promo) {
-        throw createError({
-            status: 404,
-            data: { message: 'Not found' }
-        });
-    }
-    if (promo.authorId != businessId.id) {
-        throw createError({
-            status: 403,
-            data: { message: 'It is not your promocode' }
-        });
-    }
-
     const validatedBody = await readValidatedBody(event, promoSchema.partial().parse)
 
-    if (validatedBody.mode == 'UNIQUE' && promo.max_count > 1) {
+    if ((validatedBody.mode == 'UNIQUE' && promo.max_count > 1) || (promo.mode == 'UNIQUE' && validatedBody.max_count > 1) || (validatedBody.max_count > 1 && validatedBody.mode == 'UNIQUE')) {
         throw createError({
             status: 400,
             data: { message: 'It is unique promo' }
         });
     }
 
-    if (promo.mode == 'UNIQUE' && validatedBody.max_count > 1) {
+    if (promo.mode == 'COMMON' && promo.used_count > validatedBody.max_count) {
         throw createError({
             status: 400,
-            data: { message: 'It is unique promo' }
-        });
-    }
-
-    if (!validatedBody) {
-        throw createError({
-            status: 400,
-            data: { message: 'Bad edit' }
+            data: { message: 'Used count exceeds max count' }
         });
     }
 
     const updatedPromo = await prisma.promocode.update({
-        where: { id: promo.id }, data: { ...validatedBody, target: validatedBody.target ? validatedBody.target : promo.target }
+        where: { id: promo.id }, data: {
+            ...validatedBody,
+            active: (validatedBody.max_count == promo.used_count || promo.used_count >= promo.max_count && validatedBody.max_count == promo.used_count || checkPromoActiveViaDate(validatedBody.active_from, validatedBody.active_until)) ? false : true,
+            target: validatedBody.target ? validatedBody.target : promo.target,
+        },
+        include: { author: true }
     })
-    return updatedPromo
+
+    return {
+        promo_id: updatedPromo.uuid,
+        company_id: updatedPromo.author.uuid,
+        company_name: updatedPromo.author.name,
+        active: updatedPromo.active,
+        like_count: updatedPromo.like_count,
+        used_count: updatedPromo.used_count
+    }
 }))
 
-api.get('/business/promo/list', eventHandler(async (event) => {
-    return
-}))
 api.get('/business/promo/stat', eventHandler(async (event) => {
     return
 }))
-
-
-
-
 
 api.post('/user/auth/sign-up', eventHandler(async (event) => {
     const { email, password, name, surname, avatar_url, other } = await readBody(event)
@@ -477,7 +553,7 @@ api.patch('/user/profile', eventHandler(async (event) => {
     }
 
     const updatedUser = await prisma.user.update({
-        where: { id: user.id }, data: { ...validatedBody, password: validatedBody.password ? await generateHash(validatedBody.password) : user.password }
+        where: { id: user.id }, data: { ...validatedBody, password: validatedBody.password ? await generateHash(validatedBody.password) : user.password }, omit: { password: false }
     })
     return updatedUser
 }))
@@ -782,6 +858,7 @@ api.put('/user/promo/:id/comments/:comment_id', eventHandler(async (event) => {
 
     const validatedBody = await readValidatedBody(event, commentSchema.parse)
 
+
     await prisma.comment.update({ where: { id: comment.id }, data: validatedBody })
 
     event.node.res.statusCode = 201
@@ -869,9 +946,11 @@ api.post('/user/promo/:id/activate', eventHandler(async (event) => {
             data: { message: 'You already activated this promocode' }
         });
     }
+    // setPromoStatus
     let check = ((promocode.mode == 'UNIQUE' && promocode.promo_unique.length > 0) ||
         (promocode.mode == 'COMMON' && promocode.used_count < promocode.max_count))
-    if (!promocode.active || user.other.country != promocode.target?.country || user.other.age < promocode.target?.age_from || user.other.age > promocode.target?.age_until) {
+    //
+    if (!promocode.active || (promocode.target.country && user.other.country != promocode.target.country) || (promocode.target.age_from && user.other.age < promocode.target?.age_from) || (promocode.target.age_until && user.other.age > promocode.target?.age_until)) {
         throw createError({
             status: 400,
             data: { message: 'You are unable to activate this promocode' }
@@ -906,12 +985,26 @@ api.post('/user/promo/:id/activate', eventHandler(async (event) => {
             data: { message: 'You are unable to activate this promocode' }
         });
     }
+    let promoValue;
 
-    await prisma.promocode.update({
-        where: { id: promocode.id }, data: {
-            used_count: { increment: 1 }
-        }
-    })
+    if (promocode.mode == 'COMMON') {
+        await prisma.promocode.update({
+            where: { id: promocode.id }, data: {
+                used_count: { increment: 1 }
+            }
+        })
+
+        promoValue = promocode.promo_common
+    } else if (promocode.mode == 'UNIQUE') {
+        let uniquePromo = promocode.promo_unique[0]
+        await prisma.promocode.update({
+            where: { id: promocode.id }, data: {
+                promo_unique: promocode.promo_unique?.filter((val) => val != uniquePromo)
+            }
+        })
+
+        promoValue = uniquePromo
+    }
 
     await prisma.user.update({
         where: { id: user.id }, data: {
@@ -919,7 +1012,7 @@ api.post('/user/promo/:id/activate', eventHandler(async (event) => {
         }
     })
 
-    return promocode.mode == 'COMMON' ? promocode.promo_common : promocode.promo_unique
+    return promoValue
 }))
 
 api.get('/user/promo/history', eventHandler(async (event) => {

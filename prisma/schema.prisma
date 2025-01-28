@@ -71,4 +71,6 @@ model Promocode {
   used_count Int @default(0)
   like_count Int @default(0)
   comments Comment[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
