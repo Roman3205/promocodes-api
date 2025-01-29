@@ -4,18 +4,20 @@ import { generateHash } from "./utils/hash.js";
 import { createApp, createRouter, eventHandler, useBase, readValidatedBody, readBody, createError, getRequestHeader, getRouterParams, setResponseHeader, getQuery, } from "h3";
 import dotenv from 'dotenv'
 import bcrypt from 'bcrypt'
-import dayjs from 'dayjs'
-import utc from 'dayjs/plugin/utc.js'
 import jwt from 'jsonwebtoken'
-// import { ofetch } from "ofetch";
 import promoSchema from "./schemas/promoSchema.js";
 import { randomUUID } from "node:crypto";
 import userSchema from "./schemas/userSchema.js";
 import commentSchema from "./schemas/commentSchema.js";
 import redis from 'redis'
+import saveUserToken from "./utils/saveUserToken.js";
+import saveBusinessToken from "./utils/saveBusinessToken.js";
+import checkPromoStatus from "./utils/checkPromoStatus.js";
+import checkPromoActiveViaDate from "./utils/checkPromoActiveViaDate.js";
+// import { ofetch } from "ofetch";
 
-dayjs.extend(utc)
 dotenv.config()
+
 export const app = createApp({
     onError: (error) => {
         console.log(error)
@@ -51,11 +53,21 @@ app.use(eventHandler(async (event) => {
     if (!token) {
         throw createError({
             status: 401,
-            data: { message: 'Unauthorized' }
+            data: { message: 'No authorization token passed' }
+
         });
     }
 
-    const id = jwt.verify(token, process.env.RANDOM_SECRET)
+    const id = jwt.verify(token, process.env.RANDOM_SECRET, (error, decoded) => {
+        if (error) {
+            throw createError({
+                status: 401,
+                data: { message: 'Unauthorized' }
+            });
+        }
+
+        return decoded
+    })
 
     if (id.person == 'user') {
         throw createError({
@@ -90,10 +102,20 @@ app.use(eventHandler(async (event) => {
     if (!token) {
         throw createError({
             status: 401,
-            data: { message: 'Unauthorized' }
+            data: { message: 'No authorization token passed' }
         });
     }
-    const id = jwt.verify(token, process.env.RANDOM_SECRET)
+
+    const id = jwt.verify(token, process.env.RANDOM_SECRET, (error, decoded) => {
+        if (error) {
+            throw createError({
+                status: 401,
+                data: { message: 'Unauthorized' }
+            });
+        }
+        return decoded
+    })
+
     if (id.person == 'business') {
         throw createError({
             status: 400,
@@ -111,13 +133,15 @@ app.use(eventHandler(async (event) => {
 
     event.context.user = user
 }))
+
 const router = createRouter()
 app.use(router)
 const api = createRouter()
+
 const conn = process.env.POSTGRES_CONN.replace(/"/g, '')
 console.log(conn);
 
-const prisma = new PrismaClient()
+export const prisma = new PrismaClient()
 
 await prisma.$connect().catch(async (err) => {
     await prisma.$disconnect()
@@ -125,70 +149,9 @@ await prisma.$connect().catch(async (err) => {
 }
 )
 
-const saveUserToken = async (id) => {
-    const token = jwt.sign({ id: id, person: 'user' }, process.env.RANDOM_SECRET, {
-        expiresIn: '12h'
-    })
-    const savedToken = await prisma.tokenUser.create({
-        data: {
-            userId: id,
-            token: token
-        }
-    })
-    return savedToken
-}
-
-const saveBusinessToken = async (id) => {
-    const token = jwt.sign({ id: id, person: 'business' }, process.env.RANDOM_SECRET, {
-        expiresIn: '12h'
-    })
-    const savedToken = await prisma.tokenBusiness.create({
-        data: {
-            businessId: id,
-            token: token
-        }
-    })
-    return savedToken
-}
-
-const checkPromoActiveViaDate = (from, until) => {
-    let time = dayjs().utc({ keepLocalTime: false })
-    from = dayjs(from).utc({ keepLocalTime: false })
-    until = dayjs(until).utc({ keepLocalTime: false })
-
-
-    if (!until && from) {
-        return time.isSame(from) || time.isAfter(from)
-    }
-
-    if (!from && until) {
-        return time.isSame(until) || time.isBefore(until)
-    }
-
-    if (from && until) {
-        let c1 = time.isSame(from) || time.isAfter(from)
-        let c2 = time.isSame(until) || time.isBefore(until)
-        return c1 && c2
-    }
-
-    return true
-}
-
-const setPromoStatus = async (uuid) => {
-    const promo = await prisma.promocode.findFirst({ where: { uuid: uuid } })
-    let c1 = checkPromoActiveViaDate(promo.active_from, promo.active_until)
-    let c2 = promo.mode == 'UNIQUE' ? promo.promo_unique.length > 0 : true
-    let c3 = promo.mode == 'COMMON' ? promo.max_count > promo.used_count : true
-    if (c1 && c2 && c3) {
-        return true
-    }
-    await prisma.promocode.update({ where: { id: promo.id }, data: { active: false } })
-    return true
-}
-
 api.get('/ping', eventHandler((event) => {
     return {
-        status: "PROOOOOOOOOOOOOOOOOD",
+        status: "Works",
     }
 }))
 
@@ -318,15 +281,13 @@ api.post('/business/promo', eventHandler(async (event) => {
         id: uuid
     }
 }))
-// Если все указанные компанией значения были активированы, промокод принимает значение active = false. Промокоды такого типа могут использоваться, когда компания хочет явно знать, с какой площадки пришел пользователь.
+
 api.get('/business/promo', eventHandler(async (event) => {
     const { business } = event.context
     const { limit, offset, sort_by, country } = getQuery(event)
 
-    let countries = country?.split(',')[0]
-
     let promocodes = await prisma.promocode.findMany({
-        where: { authorId: business.id, target: countries?.length > 0 ? { path: ['country'], equals: countries } : {} },
+        where: { authorId: business.id },
         skip: offset ? Number(offset) : 0,
         take: limit ? Number(limit) : 10,
         orderBy: sort_by == 'from' ? [{
@@ -335,6 +296,14 @@ api.get('/business/promo', eventHandler(async (event) => {
             active_until: 'desc',
         }] : [{ createdAt: 'desc' }]
     })
+
+    if (country) {
+        let countries = country?.split(',')
+        countries = countries.map((country) => { return country.toLowerCase() })
+        promocodes = promocodes.filter((promo) => {
+            return countries.includes(promo.target?.country)
+        })
+    }
 
     setResponseHeader(event, 'X-Total-Count', promocodes.length)
 
@@ -369,6 +338,7 @@ api.get('/business/promo/:id', eventHandler(async (event) => {
         company_id: promo.author.uuid,
         company_name: promo.author.name,
         active: promo.active,
+        image_url: promo.image_url,
         like_count: promo.like_count,
         used_count: promo.used_count
     }
@@ -388,10 +358,10 @@ api.patch('/business/promo/:id', eventHandler(async (event) => {
 
     const body = await readBody(event)
 
-    if (body.mode !== 'COMMON' && body.mode !== 'UNIQUE' || body.mode === 'COMMON' && !body.promo_common || body.mode === 'UNIQUE' && !body.promo_unique || body.mode === 'COMMON' && body.promo_unique || body.mode === 'UNIQUE' && body.promo_common) {
+    if (body.mode || body.promo_unique || body.promo_common || body.active || body.used_count || body.like_count) {
         throw createError({
             status: 400,
-            data: { message: 'Incorrect mode' }
+            data: { message: 'You can not edit mode settings or promo counts' }
         });
     }
 
@@ -411,7 +381,7 @@ api.patch('/business/promo/:id', eventHandler(async (event) => {
 
     const validatedBody = await readValidatedBody(event, promoSchema.partial().parse)
 
-    if ((validatedBody.mode == 'UNIQUE' && promo.max_count > 1) || (promo.mode == 'UNIQUE' && validatedBody.max_count > 1) || (validatedBody.max_count > 1 && validatedBody.mode == 'UNIQUE')) {
+    if (promo.mode == 'UNIQUE' && validatedBody.max_count > 1) {
         throw createError({
             status: 400,
             data: { message: 'It is unique promo' }
@@ -428,7 +398,7 @@ api.patch('/business/promo/:id', eventHandler(async (event) => {
     const updatedPromo = await prisma.promocode.update({
         where: { id: promo.id }, data: {
             ...validatedBody,
-            active: (validatedBody.max_count == promo.used_count || promo.used_count >= promo.max_count && validatedBody.max_count == promo.used_count || checkPromoActiveViaDate(validatedBody.active_from, validatedBody.active_until)) ? false : true,
+            active: (validatedBody.max_count == promo.used_count || !checkPromoActiveViaDate(validatedBody.active_from, validatedBody.active_until)) ? false : true,
             target: validatedBody.target ? validatedBody.target : promo.target,
         },
         include: { author: true }
@@ -439,13 +409,54 @@ api.patch('/business/promo/:id', eventHandler(async (event) => {
         company_id: updatedPromo.author.uuid,
         company_name: updatedPromo.author.name,
         active: updatedPromo.active,
+        image_url: promo.image_url,
         like_count: updatedPromo.like_count,
         used_count: updatedPromo.used_count
     }
 }))
 
-api.get('/business/promo/stat', eventHandler(async (event) => {
-    return
+api.get('/business/promo/:id/stat', eventHandler(async (event) => {
+    const { id } = getRouterParams(event)
+    if (!id) {
+        throw createError({
+            status: 400,
+            data: { message: 'No id passed' }
+        });
+    }
+    const { business } = event.context
+    const promo = await prisma.promocode.findFirst({ where: { uuid: id }, include: { author: true } })
+    if (!promo) {
+        throw createError({
+            status: 404,
+            data: { message: 'Not found' }
+        });
+    }
+    if (promo.authorId != business.id) {
+        throw createError({
+            status: 403,
+            data: { message: 'It is not your promocode' }
+        });
+    }
+
+    let countries = await prisma.user.findMany({ where: { activatedPromocodes: { has: promo.uuid } }, select: { other: true } })
+    countries = countries.map(country => ({
+        country: country.other?.country,
+        activations_count: countries.filter(c => c.other?.country == country.other?.country).length
+    }))
+
+    let uniqueCountries = countries.filter((c, o, arr) => arr.findIndex((item) => JSON.stringify(item) === JSON.stringify(c)) === o)
+    return {
+        activations_count: uniqueCountries.reduce((acc, i) => acc + i.activations_count, 0),
+        countries: uniqueCountries.sort((a, b) => {
+            if (a.country < b.country) {
+                return -1;
+            }
+            if (a.country > b.country) {
+                return 1;
+            }
+            return 0;
+        })
+    }
 }))
 
 api.post('/user/auth/sign-up', eventHandler(async (event) => {
@@ -534,23 +545,16 @@ api.get('/user/profile', eventHandler(async (event) => {
 
 api.patch('/user/profile', eventHandler(async (event) => {
     const { user } = event.context
+    const body = await readBody(event)
 
-    const validatedBody = await readValidatedBody(event, userSchema.partial().parse)
-
-    if (!validatedBody) {
+    if (body.other || body.email) {
         throw createError({
             status: 400,
-            data: { message: 'Bad edit' }
+            data: { message: 'You can not edit email or other settings' }
         });
     }
 
-    const existingEmail = await prisma.user.findFirst({ where: { email: validatedBody.email } })
-    if (existingEmail) {
-        throw createError({
-            status: 409,
-            data: { message: 'Email already registered' }
-        });
-    }
+    const validatedBody = await readValidatedBody(event, userSchema.partial().parse)
 
     const updatedUser = await prisma.user.update({
         where: { id: user.id }, data: { ...validatedBody, password: validatedBody.password ? await generateHash(validatedBody.password) : user.password }, omit: { password: false }
@@ -561,7 +565,7 @@ api.patch('/user/profile', eventHandler(async (event) => {
 api.get('/user/feed', eventHandler(async (event) => {
     const { user } = event.context
 
-    const { limit, offset } = getQuery(event)
+    const { limit, offset, category, active } = getQuery(event)
 
     let promocodes = await prisma.promocode.findMany({
         include: {
@@ -571,17 +575,31 @@ api.get('/user/feed', eventHandler(async (event) => {
         take: limit ? Number(limit) : 10,
     })
 
-    promocodes = promocodes.filter((val) => {
-        return ((val.mode == 'UNIQUE' && val.promo_unique.length > 0) ||
-            (val.mode == 'COMMON' && val.used_count < val.max_count)) &&
-            (((val.active_from ? dayjs().utc({ keepLocalTime: false }).isAfter(val.active_from) : false) || (val.active_until ? dayjs().utc({ keepLocalTime: false }).isAfter(val.active_until) : false)) || (val.active_until && val.active_from ? dayjs().utc({ keepLocalTime: false }).isAfter(val.active_from) && dayjs().utc({ keepLocalTime: false }).isBefore(val.active_until) : false))
-    })
-    const mappedPromocodes = promocodes.map((val) => ({
-        promo_id: val.uuid,
-        company_name: val.author.name,
-        active: val.active,
+    if (active == 'true' && category) {
+        promocodes = promocodes.filter((val) => val.target.categories?.includes(category.toLowerCase()) && checkPromoStatus(val.active_from, val.active_until, val.mode, val.promo_unique, val.max_count, val.used_count, val.active))
+    } else if (category && active != 'true') {
+        promocodes = promocodes.filter((val) => val.target.categories?.includes(category.toLowerCase()))
+    } else if (active == 'true' && !category) {
+        promocodes = promocodes.filter((val) => {
+            return checkPromoStatus(val.active_from, val.active_until, val.mode, val.promo_unique, val.max_count, val.used_count, val.active)
+        })
+    }
+
+    const mappedPromocodes = promocodes.map((promo) => ({
+        promo_id: promo.uuid,
+        company_id: promo.author.uuid,
+        company_name: promo.author.name,
+        description: promo.description,
+        active: promo.active,
+        is_activated_by_user: user.activatedPromocodes.includes(promo.uuid) ? true : false,
+        like_count: promo.like_count,
+        is_liked_by_user: user.likedPromocodes.includes(promo.uuid) ? true : false,
+        comment_count: promo.comments?.length,
+        image_url: promo.image_url
     }))
+
     setResponseHeader(event, 'X-Total-Count', promocodes.length)
+
     return mappedPromocodes
 }))
 
@@ -611,10 +629,11 @@ api.get('/user/promo/:id', eventHandler(async (event) => {
         company_name: promocode.author.name,
         description: promocode.description,
         active: promocode.active,
-        is_activated_by_user: user.activatedPromocodes.include(promocode.uuid) ? true : false,
+        is_activated_by_user: user.activatedPromocodes.includes(promocode.uuid) ? true : false,
         like_count: promocode.like_count,
-        is_liked_by_user: user.likedPromocodes.include(promocode.uuid) ? true : false,
-        comment_count: promocode.comments.length
+        image_url: promo.image_url,
+        is_liked_by_user: user.likedPromocodes.includes(promocode.uuid) ? true : false,
+        comment_count: promocode.comments?.length
     }
 }))
 
@@ -858,10 +877,10 @@ api.put('/user/promo/:id/comments/:comment_id', eventHandler(async (event) => {
 
     const validatedBody = await readValidatedBody(event, commentSchema.parse)
 
-
     await prisma.comment.update({ where: { id: comment.id }, data: validatedBody })
 
     event.node.res.statusCode = 201
+
     return 'Comment has been updated'
 }))
 
@@ -946,10 +965,7 @@ api.post('/user/promo/:id/activate', eventHandler(async (event) => {
             data: { message: 'You already activated this promocode' }
         });
     }
-    // setPromoStatus
-    let check = ((promocode.mode == 'UNIQUE' && promocode.promo_unique.length > 0) ||
-        (promocode.mode == 'COMMON' && promocode.used_count < promocode.max_count))
-    //
+
     if (!promocode.active || (promocode.target.country && user.other.country != promocode.target.country) || (promocode.target.age_from && user.other.age < promocode.target?.age_from) || (promocode.target.age_until && user.other.age > promocode.target?.age_until)) {
         throw createError({
             status: 400,
@@ -979,7 +995,7 @@ api.post('/user/promo/:id/activate', eventHandler(async (event) => {
     // await client.set('antifraud', response)
     // }
 
-    if (!check || statusAF != 200 || !response.ok) {
+    if (!checkPromoStatus(promocode.active_from, promocode.active_until, promocode.mode, promocode.promo_unique, promocode.max_count, promocode.used_count, promocode.active) || statusAF != 200 || !response.ok) {
         throw createError({
             status: 400,
             data: { message: 'You are unable to activate this promocode' }
@@ -1034,10 +1050,11 @@ api.get('/user/promo/history', eventHandler(async (event) => {
         company_name: promo.author.name,
         description: promo.description,
         active: promo.active,
-        is_activated_by_user: user.activatedPromocodes.include(promo.uuid) ? true : false,
+        is_activated_by_user: user.activatedPromocodes.includes(promo.uuid) ? true : false,
         like_count: promo.like_count,
-        is_liked_by_user: user.likedPromocodes.include(promo.uuid) ? true : false,
-        comment_count: promo.comments.length
+        is_liked_by_user: user.likedPromocodes.includes(promo.uuid) ? true : false,
+        comment_count: promo.comments?.length,
+        image_url: promo.image_url
     }))
 
     return items

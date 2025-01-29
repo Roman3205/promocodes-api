@@ -1,5 +1,4 @@
 import { z } from "zod";
 export default z.object({
-    text: z.string().min(10).max(1000),
-    date: z.string().date().optional()
+    text: z.string().min(10).max(1000)
 })

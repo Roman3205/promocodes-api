@@ -14,3 +14,5 @@ RUN npx prisma db push
 
 EXPOSE 3030
 CMD node ./server.mjs
+
+# CMD ["sh", "-c", "npx prisma generate && npx prisma db push && node ./server.mjs"]

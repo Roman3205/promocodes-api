@@ -4,8 +4,8 @@ export default z.object({
     target: z.object({
         age_from: z.number().min(0).max(100).optional(),
         age_until: z.number().min(0).max(100).optional(),
-        country: z.string().optional(),
-        categories: z.array(z.string().min(2).max(20)).max(20).optional()
+        country: z.string().toLowerCase().optional(),
+        categories: z.array(z.string().toLowerCase().min(2).max(20)).max(20).optional()
     }).refine((val) => !val.country || val.country.length == 2).refine((val) => !val.age_from || !val.age_until || val.age_from < val.age_until),
     max_count: z.number().min(1),
     active_from: z.string().date().max(10).optional(),
