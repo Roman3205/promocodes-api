@@ -9,7 +9,7 @@ import promoSchema from "./schemas/promoSchema.js";
 import { randomUUID } from "node:crypto";
 import userSchema from "./schemas/userSchema.js";
 import commentSchema from "./schemas/commentSchema.js";
-import redis from 'redis'
+// import redis from 'redis'
 import saveUserToken from "./utils/saveUserToken.js";
 import saveBusinessToken from "./utils/saveBusinessToken.js";
 import checkPromoStatus from "./utils/checkPromoStatus.js";
@@ -24,19 +24,20 @@ export const app = createApp({
     }
 })
 
-const client = redis.createClient({
-    // url: 'redis://redis:6379',
-    socket: {
-        host: process.env.REDIS_HOST,
-        port: process.env.REDIS_PORT
-    },
-    // password: 'password'
-})
-// client.on('error', (err) => console.log(err))
+// const client = redis.createClient({
+// url: 'redis://redis:6379',
+// socket: {
+//     host: process.env.REDIS_HOST,
+//     port: process.env.REDIS_PORT
+// },
+// password: 'password'
+// })
 
-// (async () => {
+
+// const connectRedis = async () => {
 //     await client.connect()
-// })()
+// }
+// connectRedis()
 
 app.use(eventHandler(async (event) => {
     const protectedRoutes = ['/api/business/promo']
@@ -149,7 +150,7 @@ await prisma.$connect().catch(async (err) => {
 }
 )
 
-api.get('/ping', eventHandler((event) => {
+api.get('/ping', eventHandler(() => {
     return {
         status: "Works",
     }
@@ -566,7 +567,6 @@ api.get('/user/feed', eventHandler(async (event) => {
     const { user } = event.context
 
     const { limit, offset, category, active } = getQuery(event)
-
     let promocodes = await prisma.promocode.findMany({
         include: {
             author: true
