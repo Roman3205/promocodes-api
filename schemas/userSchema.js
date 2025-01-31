@@ -1,5 +1,6 @@
-import { z } from "zod";
-export default z.object({
+const { z } = require('zod')
+
+module.exports = z.object({
     name: z.string().min(1).max(100),
     surname: z.string().min(1).max(120),
     avatar_url: z.string().min(1).max(350).optional(),

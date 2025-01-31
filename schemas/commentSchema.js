@@ -1,4 +1,5 @@
-import { z } from "zod";
-export default z.object({
+const { z } = require('zod')
+
+module.exports = z.object({
     text: z.string().min(10).max(1000)
 })

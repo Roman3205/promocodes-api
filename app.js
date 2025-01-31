@@ -1,24 +1,23 @@
-import { PrismaClient } from "@prisma/client";
-import businessSchema from './schemas/businessSchema.js'
-import { generateHash } from "./utils/hash.js";
-import { createApp, createRouter, eventHandler, useBase, readValidatedBody, readBody, createError, getRequestHeader, getRouterParams, setResponseHeader, getQuery, } from "h3";
-import dotenv from 'dotenv'
-import bcrypt from 'bcrypt'
-import jwt from 'jsonwebtoken'
-import promoSchema from "./schemas/promoSchema.js";
-import { randomUUID } from "node:crypto";
-import userSchema from "./schemas/userSchema.js";
-import commentSchema from "./schemas/commentSchema.js";
-// import redis from 'redis'
-import saveUserToken from "./utils/saveUserToken.js";
-import saveBusinessToken from "./utils/saveBusinessToken.js";
-import checkPromoStatus from "./utils/checkPromoStatus.js";
-import checkPromoActiveViaDate from "./utils/checkPromoActiveViaDate.js";
-// import { ofetch } from "ofetch";
+const { PrismaClient } = require("@prisma/client")
+const businessSchema = require('./schemas/businessSchema')
+const generateHash = require("./utils/hash")
+const { createApp, createRouter, eventHandler, useBase, readValidatedBody, readBody, createError, getRequestHeader, getRouterParams, setResponseHeader, getQuery, } = require("h3")
+const bcrypt = require('bcrypt')
+const jwt = require('jsonwebtoken')
+const promoSchema = require("./schemas/promoSchema")
+const { randomUUID } = require("node:crypto")
+const userSchema = require("./schemas/userSchema")
+const commentSchema = require("./schemas/commentSchema")
+// import redis =require( 'redis')
+const saveUserToken = require("./utils/saveUserToken")
+const saveBusinessToken = require("./utils/saveBusinessToken")
+const checkPromoStatus = require("./utils/checkPromoStatus")
+const checkPromoActiveViaDate = require('./utils/checkPromoActiveViaDate')
+const dotEnv = require('dotenv')
+dotEnv.config({ path: __dirname + '/.env' });
+// import { ofetch } =require( "ofetch")
 
-dotenv.config()
-
-export const app = createApp({
+const app = createApp({
     onError: (error) => {
         console.log(error)
     }
@@ -32,7 +31,6 @@ export const app = createApp({
 // },
 // password: 'password'
 // })
-
 
 // const connectRedis = async () => {
 //     await client.connect()
@@ -139,16 +137,10 @@ const router = createRouter()
 app.use(router)
 const api = createRouter()
 
-const conn = process.env.POSTGRES_CONN.replace(/"/g, '')
-console.log(conn);
+const prisma = new PrismaClient()
 
-export const prisma = new PrismaClient()
-
-await prisma.$connect().catch(async (err) => {
-    await prisma.$disconnect()
-    console.log(err)
-}
-)
+module.exports.prisma = prisma
+module.exports.app = app
 
 api.get('/ping', eventHandler(() => {
     return {

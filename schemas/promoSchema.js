@@ -1,5 +1,6 @@
-import { z } from "zod";
-export default z.object({
+const { z } = require('zod')
+
+module.exports = z.object({
     description: z.string().min(10).max(300),
     target: z.object({
         age_from: z.number().min(0).max(100).optional(),
